@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic Daily Timesheet Reporter</title>
+    
+    <!-- React & Tailwind Dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- PyScript / Pyodide Core for Browser-based Python Execution -->
+    <link rel="stylesheet" href="https://pyscript.net/releases/2023.11.1/core.css">
+    <script type="module" src="https://pyscript.net/releases/2023.11.1/core.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0f172a;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            color: #f8fafc;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex items-center justify-center p-4">
+    <div id="timesheet-app-root" class="w-full"></div>
+
+    <!-- Python In-Browser Smart Parser Logic -->
+    <script type="py">
+import re
+import json
+
+def parse_timesheet_text(raw_text):
+    if not raw_text or not raw_text.strip():
+        return json.dumps({"date": None, "project": None, "tasks": []})
+
+    lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+    
+    extracted_date = None
+    extracted_project = None
+    tasks = []
+
+    # Regex patterns for flex matching headers
+    date_pattern = re.compile(r'^(?:date|dt|created|day)\s*[:\-=]?\s*(.+)$', re.IGNORECASE)
+    project_pattern = re.compile(r'^(?:project(?:\s*name)?|proj|p_name)\s*[:\-=]?\s*(.+)$', re.IGNORECASE)
+    header_skip_pattern = re.compile(r'^(?:tasks?|updates?|tasks?\s*updates?|log|work\s*done|status)[:\-=]?$', re.IGNORECASE)
+
+    # Status indicators mapping
+    done_terms = {'done', 'completed', 'finish', 'finished', 'complete', 'ok', 'resolved', 'closed', '100%'}
+    wip_terms = {'wip', 'in progress', 'working', 'progress', 'doing', 'ongoing', 'started', '50%'}
+    todo_terms = {'todo', 'pending', 'to do', 'backlog', 'blocked', 'open', '0%'}
+
+    # Strategy 1: Explicit metadata scan
+    unhandled_lines = []
+    for line in lines:
+        d_match = date_pattern.match(line)
+        if d_match and not extracted_date:
+            extracted_date = d_match.group(1).strip()
+            continue
+
+        p_match = project_pattern.match(line)
+        if p_match and not extracted_project:
+            extracted_project = p_match.group(1).strip()
+            continue
+
+        if header_skip_pattern.match(line):
+            continue
+
+        unhandled_lines.append(line)
+
+    # Strategy 2: Implicit Project Name detection (e.g. "CIU Consumer investigation")
+    final_task_lines = []
+    for idx, line in enumerate(unhandled_lines):
+        if idx == 0 and not extracted_project:
+            is_task_like = re.search(r'[\(\[\-\:\,\s]+(done|completed|finished|wip|in progress|working|todo|pending)[\)\]\s]*$', line, re.IGNORECASE) or \
+                           re.match(r'^\s*[\(\[]?\s*(done|completed|finished|wip|in progress|working|todo|pending)\s*[\)\]\:\-]', line, re.IGNORECASE) or \
+                           re.match(r'^(?:task\s*\d*|[\d+\.\-\*\•\>])\s*[:\-]?\s*', line, re.IGNORECASE)
+            
+            if not is_task_like and len(line.split()) >= 1 and not re.search(r'\d{1,4}[\/\-\.]\d{1,4}', line):
+                extracted_project = line.strip()
+                continue
+
+        final_task_lines.append(line)
+
+    # Status Parsing Logic
+    for line in final_task_lines:
+        status = 'done'
+        cleaned_line = line
+
+        # 1. Trailing brackets/parentheses status check like "(wip)", "[done]", "- todo"
+        inline_status_match = re.search(r'[\(\[\-\:\,\s]+(done|completed|finished|wip|in progress|working|todo|pending)[\)\]\s]*$', cleaned_line, re.IGNORECASE)
+        if inline_status_match:
+            term = inline_status_match.group(1).lower()
+            if term in done_terms:
+                status = 'done'
+            elif term in wip_terms:
+                status = 'wip'
+            elif term in todo_terms:
+                status = 'todo'
+            cleaned_line = cleaned_line[:inline_status_match.start()].strip()
+
+        # 2. Leading status check like "[WIP] Task text", "DONE: Task text"
+        prefix_status_match = re.match(r'^\s*[\(\[]?\s*(done|completed|finished|wip|in progress|working|todo|pending)\s*[\)\]\:\-]\s*(.+)$', cleaned_line, re.IGNORECASE)
+        if prefix_status_match:
+            term = prefix_status_match.group(1).lower()
+            if term in done_terms:
+                status = 'done'
+            elif term in wip_terms:
+                status = 'wip'
+            elif term in todo_terms:
+                status = 'todo'
+            cleaned_line = prefix_status_match.group(2).strip()
+
+        # Clean noise: remove bullets (*, -, •, numbers like 1., Task1:, task2)
+        cleaned_line = re.sub(r'^(?:task\s*\d*\s*[:\-]?\s*|[\d+\.\-\*\•\>]\s*)', '', cleaned_line, flags=re.IGNORECASE).strip()
+
+        if cleaned_line:
+            tasks.append({
+                "text": cleaned_line,
+                "status": status
+            })
+
+    return json.dumps({
+        "date": extracted_date,
+        "project": extracted_project,
+        "tasks": tasks
+    })
+
+# Expose function to JS Window object
+from pyodide.ffi import create_proxy
+import js
+js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
+    </script>
+
+    <!-- React Application Code -->
+    <script type="text/babel">
+      // IndexedDB Helper Utility
+      const DB_NAME = 'TimesheetAppDB';
+      const DB_VERSION = 1;
+      const STORE_NAME = 'history';
+
+      const openDB = () => {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(DB_NAME, DB_VERSION);
+          request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+            }
+          };
+          request.onsuccess = (event) => resolve(event.target.result);
+          request.onerror = (event) => reject(event.target.error);
+        });
+      };
+
+      const saveRecordToDB = async (record) => {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_NAME, 'readwrite');
+          const store = transaction.objectStore(STORE_NAME);
+          const request = store.put(record);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = (event) => reject(event.target.error);
+        });
+      };
+
+      const getAllRecordsFromDB = async () => {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_NAME, 'readonly');
+          const store = transaction.objectStore(STORE_NAME);
+          const request = store.getAll();
+          request.onsuccess = () => resolve(request.result || []);
+          request.onerror = (event) => reject(event.target.error);
+        });
+      };
+
+      const deleteRecordFromDB = async (id) => {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_NAME, 'readwrite');
+          const store = transaction.objectStore(STORE_NAME);
+          const request = store.delete(id);
+          request.onsuccess = () => resolve();
+          request.onerror = (event) => reject(event.target.error);
+        });
+      };
+
+      const clearAllRecordsFromDB = async () => {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_NAME, 'readwrite');
+          const store = transaction.objectStore(STORE_NAME);
+          const request = store.clear();
+          request.onsuccess = () => resolve();
+          request.onerror = (event) => reject(event.target.error);
+        });
+      };
+
+      function TimesheetApp() {
+        const getCurrentDateString = () => {
+          const d = new Date();
+          const day = d.getDate();
+          const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+          return `${day}-${months[d.getMonth()]}-${d.getFullYear()}`;
+        };
+
+        const getCurrentTimeString = () => {
+          return new Date().toLocaleTimeString();
+        };
+
+        const defaultTasks = [];
+
+        const [projectName, setProjectName] = React.useState('');
+        const [customDate, setCustomDate] = React.useState(getCurrentDateString());
+        const [currentTime, setCurrentTime] = React.useState(getCurrentTimeString());
+        const [tasks, setTasks] = React.useState(defaultTasks);
+        const [inputTask, setInputTask] = React.useState('');
+        const [taskStatus, setTaskStatus] = React.useState('done');
+        const [copied, setCopied] = React.useState(false);
+        const [pastedText, setPastedText] = React.useState('');
+        const [isPythonReady, setIsPythonReady] = React.useState(false);
+
+        // History View States
+        const [activeView, setActiveView] = React.useState('editor'); // 'editor' | 'history'
+        const [history, setHistory] = React.useState([]);
+        const [historySearch, setHistorySearch] = React.useState('');
+        const [saveToast, setSaveToast] = React.useState(false);
+
+        const loadHistory = React.useCallback(async () => {
+          try {
+            const records = await getAllRecordsFromDB();
+            records.sort((a, b) => b.timestamp - a.timestamp);
+            setHistory(records);
+          } catch (err) {
+            console.error("Failed to load history from IndexedDB:", err);
+          }
+        }, []);
+
+        React.useEffect(() => {
+          loadHistory();
+
+          const timer = setInterval(() => {
+            setCurrentTime(getCurrentTimeString());
+          }, 1000);
+
+          // Check periodically for PyScript initialization
+          const checkPyReady = setInterval(() => {
+            if (typeof window.pythonParseTimesheet === 'function') {
+              setIsPythonReady(true);
+              clearInterval(checkPyReady);
+            }
+          }, 300);
+
+          return () => {
+            clearInterval(timer);
+            clearInterval(checkPyReady);
+          };
+        }, [loadHistory]);
+
+        const addTask = (e) => {
+          e.preventDefault();
+          if (!inputTask.trim()) return;
+          setTasks([...tasks, { id: Date.now(), text: inputTask.trim(), status: taskStatus }]);
+          setInputTask('');
+        };
+
+        const updateTaskText = (id, newText) => {
+          setTasks(tasks.map(t => t.id === id ? { ...t, text: newText } : t));
+        };
+
+        const updateTaskStatus = (id, newStatus) => {
+          setTasks(tasks.map(t => t.id === id ? { ...t, status: newStatus } : t));
+        };
+
+        const removeTask = (id) => {
+          setTasks(tasks.filter(t => t.id !== id));
+        };
+
+        const resetTimesheet = () => {
+          setCustomDate(getCurrentDateString());
+          setProjectName('');
+          setTasks([]);
+          setInputTask('');
+          setTaskStatus('done');
+          setPastedText('');
+        };
+
+        // Smart Import using Browser-embedded Python engine with fallback
+        const parseTextToTimesheet = () => {
+          if (!pastedText.trim()) return;
+
+          let parsedResult = null;
+
+          if (window.pythonParseTimesheet) {
+            try {
+              const jsonStr = window.pythonParseTimesheet(pastedText);
+              parsedResult = JSON.parse(jsonStr);
+            } catch (err) {
+              console.error("Python parsing error, using JS fallback:", err);
+            }
+          }
+
+          if (parsedResult) {
+            if (parsedResult.date) setCustomDate(parsedResult.date);
+            if (parsedResult.project) setProjectName(parsedResult.project);
+            
+            if (parsedResult.tasks && parsedResult.tasks.length > 0) {
+              const mappedTasks = parsedResult.tasks.map(t => ({
+                id: Date.now() + Math.random(),
+                text: t.text,
+                status: t.status
+              }));
+              setTasks(prev => [...prev, ...mappedTasks]);
+              setPastedText('');
+            }
+          } else {
+            // JS Fallback in case Python engine hasn't fully loaded yet
+            const lines = pastedText.split('\n').map(l => l.trim()).filter(Boolean);
+            const newTasks = [];
+
+            lines.forEach((line, idx) => {
+              const dateMatch = line.match(/^Date\s*:\s*(.+)$/i);
+              if (dateMatch) {
+                setCustomDate(dateMatch[1].trim());
+                return;
+              }
+
+              const projectMatch = line.match(/^Project(?:\s*Name)?\s*:\s*(.+)$/i);
+              if (projectMatch) {
+                setProjectName(projectMatch[1].trim());
+                return;
+              }
+
+              if (idx === 0 && lines.length > 1) {
+                const isTaskLike = /^(Task\s*\d*|[\d+\.\-\*\•\>])\s*[:\-]?\s*/i.test(line) ||
+                                   /[\-\:]?\s*(done|completed|finish|finished|wip|in progress|working|todo|pending)$/i.test(line);
+                if (!isTaskLike) {
+                  setProjectName(line.strip ? line.strip() : line.trim());
+                  return;
+                }
+              }
+
+              if (/^Tasks?\s*Updates?:?$/i.test(line)) return;
+
+              let status = 'done';
+              let cleanedLine = line;
+
+              if (/[\-\:]?\s*(done|completed|finish|finished)$/i.test(cleanedLine)) {
+                status = 'done';
+                cleanedLine = cleanedLine.replace(/[\-\:]?\s*(done|completed|finish|finished)$/i, '');
+              } else if (/[\-\:]?\s*(wip|in progress|working)$/i.test(cleanedLine)) {
+                status = 'wip';
+                cleanedLine = cleanedLine.replace(/[\-\:]?\s*(wip|in progress|working)$/i, '');
+              } else if (/[\-\:]?\s*(todo|pending)$/i.test(cleanedLine)) {
+                status = 'todo';
+                cleanedLine = cleanedLine.replace(/[\-\:]?\s*(todo|pending)$/i, '');
+              }
+
+              cleanedLine = cleanedLine.replace(/^(Task\s*\d*\s*[:\-]?\s*|[\d+\.\-\*\•]\s*)/i, '').trim();
+
+              if (cleanedLine) {
+                newTasks.push({
+                  id: Date.now() + Math.random(),
+                  text: cleanedLine,
+                  status: status
+                });
+              }
+            });
+
+            if (newTasks.length > 0) {
+              setTasks(prev => [...prev, ...newTasks]);
+              setPastedText('');
+            }
+          }
+        };
+
+        const generateTeamsReport = () => {
+          const taskLines = tasks.map((t, idx) => `Task${idx + 1}: ${t.text} -${t.status}`).join('\n');
+          return `Date: ${customDate}
+Project Name: ${projectName}
+TasksUpdate:
+${taskLines}`;
+        };
+
+        const copyToClipboard = () => {
+          const report = generateTeamsReport();
+          navigator.clipboard.writeText(report).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          });
+        };
+
+        // Save current timesheet entry to IndexedDB
+        const saveCurrentToHistory = async () => {
+          if (!projectName.trim() && tasks.length === 0) return;
+          const record = {
+            id: 'ts_' + Date.now(),
+            timestamp: Date.now(),
+            savedAt: new Date().toLocaleString(),
+            date: customDate,
+            projectName: projectName,
+            tasks: tasks,
+            formattedReport: generateTeamsReport()
+          };
+          await saveRecordToDB(record);
+          await loadHistory();
+          setSaveToast(true);
+          setTimeout(() => setSaveToast(false), 2500);
+        };
+
+        // Load a record from history into active editor
+        const loadHistoryRecord = (record) => {
+          setCustomDate(record.date || getCurrentDateString());
+          setProjectName(record.projectName || '');
+          setTasks(record.tasks || []);
+          setActiveView('editor');
+        };
+
+        // Delete single entry from history
+        const deleteHistoryRecord = async (id, e) => {
+          e.stopPropagation();
+          await deleteRecordFromDB(id);
+          await loadHistory();
+        };
+
+        // Clear all history
+        const clearAllHistory = async () => {
+          if (window.confirm("Are you sure you want to clear all saved history from IndexedDB?")) {
+            await clearAllRecordsFromDB();
+            await loadHistory();
+          }
+        };
+
+        // Filtered history list
+        const filteredHistory = history.filter(item => {
+          const term = historySearch.toLowerCase();
+          const matchProj = (item.projectName || '').toLowerCase().includes(term);
+          const matchDate = (item.date || '').toLowerCase().includes(term);
+          const matchTasks = (item.tasks || []).some(t => t.text.toLowerCase().includes(term));
+          return matchProj || matchDate || matchTasks;
+        });
+
+        return (
+          <div className="max-w-2xl mx-auto p-6 bg-slate-900 text-slate-100 rounded-2xl shadow-2xl border border-slate-800 font-sans my-4 relative">
+            
+            {/* Save Toast Notification */}
+            {saveToast && (
+              <div className="absolute top-4 right-6 bg-emerald-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-lg flex items-center gap-1.5 z-50 animate-bounce">
+                <i className="fa-solid fa-cloud-arrow-up"></i> Saved to IndexedDB!
+              </div>
+            )}
+
+            {/* Header with Real-Time Clock & View Switcher */}
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 pb-4 border-b border-slate-800">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-cyan-400 to-emerald-400">
+                    <i className="fa-solid fa-bolt mr-1.5 text-cyan-400"></i> REAL-TIME TIMESHEET
+                  </h1>
+                  <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> LIVE
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">Instant editable updates with live preview, IndexedDB storage & Teams output.</p>
+              </div>
+
+              {/* Navigation View Switcher */}
+              <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 w-full sm:w-auto">
+                <button
+                  onClick={() => setActiveView('editor')}
+                  className={`flex-1 sm:flex-none px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    activeView === 'editor'
+                      ? 'bg-indigo-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <i className="fa-solid fa-pen-to-square"></i> Editor
+                </button>
+                <button
+                  onClick={() => setActiveView('history')}
+                  className={`flex-1 sm:flex-none px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    activeView === 'history'
+                      ? 'bg-indigo-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <i className="fa-solid fa-clock-rotate-left"></i> History ({history.length})
+                </button>
+              </div>
+            </div>
+
+            {/* TAB 1: EDITOR VIEW */}
+            {activeView === 'editor' && (
+              <div>
+                {/* Action Buttons */}
+                <div className="flex items-center gap-2 mb-6 justify-end">
+                  <button
+                    onClick={saveCurrentToHistory}
+                    className="bg-slate-800 hover:bg-emerald-950/50 text-slate-300 hover:text-emerald-400 border border-slate-700 hover:border-emerald-800/60 font-semibold px-3 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    title="Save current timesheet record to IndexedDB history"
+                  >
+                    <i className="fa-solid fa-floppy-disk"></i> Save to DB
+                  </button>
+                  <button
+                    onClick={resetTimesheet}
+                    className="bg-slate-800 hover:bg-red-950/40 text-slate-300 hover:text-red-400 border border-slate-700 hover:border-red-800/50 font-semibold px-3 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    title="Clear all tasks and reset fields"
+                  >
+                    <i className="fa-solid fa-rotate-left"></i> Reset
+                  </button>
+                  <button
+                    onClick={copyToClipboard}
+                    className="bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 shadow-lg shadow-cyan-900/40 cursor-pointer"
+                  >
+                    <i className={`fa-solid ${copied ? 'fa-check' : 'fa-copy'}`}></i>
+                    {copied ? 'Copied!' : 'Copy Teams Format'}
+                  </button>
+                </div>
+
+                {/* Dynamic Config Bar (Date, Project, Live Time) */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800">
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Date</label>
+                    <input
+                      type="text"
+                      value={customDate}
+                      onChange={(e) => setCustomDate(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-cyan-400 font-mono font-semibold focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Project Name</label>
+                    <input
+                      type="text"
+                      value={projectName}
+                      onChange={(e) => setProjectName(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-indigo-400 font-semibold focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Current Time</label>
+                    <div className="w-full bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-emerald-400 font-mono flex items-center justify-between">
+                      <span>{currentTime}</span>
+                      <i className="fa-regular fa-clock text-slate-500"></i>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Text to Timesheet Converter */}
+                <div className="mb-6 bg-slate-950/40 p-3.5 rounded-xl border border-indigo-900/40">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-bold text-indigo-400 flex items-center gap-1.5">
+                      <i className="fa-solid fa-wand-magic-sparkles"></i> Text to Timesheet (Smart Import)
+                    </label>
+                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                      isPythonReady 
+                        ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30' 
+                        : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      <i className="fa-brands fa-python mr-1"></i>
+                      {isPythonReady ? 'Python Engine Ready' : 'Loading Python Engine...'}
+                    </span>
+                  </div>
+                  <textarea
+                    rows="3"
+                    value={pastedText}
+                    onChange={(e) => setPastedText(e.target.value)}
+                    placeholder="Paste raw notes, bullet points, free text, or existing timesheets in any format..."
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono mb-2"
+                  ></textarea>
+                  <button
+                    type="button"
+                    onClick={parseTextToTimesheet}
+                    className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-4 py-1.5 rounded-lg text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow"
+                  >
+                    <i className="fa-solid fa-arrows-rotate"></i> Convert & Import Text
+                  </button>
+                </div>
+
+                {/* Quick Add Form */}
+                <form onSubmit={addTask} className="space-y-2 mb-6 bg-slate-800/40 p-3.5 rounded-xl border border-slate-700/60">
+                  <label className="block text-xs font-semibold text-slate-300">Add New Task Entry</label>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={inputTask}
+                      onChange={(e) => setInputTask(e.target.value)}
+                      placeholder="e.g. Implement real-time updates and reset functionality"
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                    />
+                    <select
+                      value={taskStatus}
+                      onChange={(e) => setTaskStatus(e.target.value)}
+                      className="bg-slate-900 border border-slate-700 text-xs text-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="done">-done</option>
+                      <option value="wip">-wip</option>
+                      <option value="todo">--Pending</option>
+                    </select>
+                    <button
+                      type="submit"
+                      className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-2 rounded-lg text-xs transition-all cursor-pointer shadow"
+                    >
+                      <i className="fa-solid fa-plus mr-1"></i> Add
+                    </button>
+                  </div>
+                </form>
+
+                {/* Realtime Editable Tasks List */}
+                <div className="mb-6">
+                  <div className="flex items-center justify-between mb-2">
+                    <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">Live Editable Tasks ({tasks.length})</h2>
+                    <span className="text-[10px] text-slate-500">Click task text directly to edit in real time</span>
+                  </div>
+                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                    {tasks.length === 0 ? (
+                      <div className="text-center py-8 text-slate-500 text-xs bg-slate-950/40 rounded-xl border border-slate-800/80">
+                        <i className="fa-regular fa-folder-open text-xl mb-1.5 block text-slate-600"></i>
+                        No tasks logged. Add a new task, paste text, or hit <strong className="text-slate-400">Reset</strong>.
+                      </div>
+                    ) : (
+                      tasks.map((t, idx) => (
+                        <div key={t.id} className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/50 border border-slate-700/60 text-xs gap-2">
+                          <span className="font-mono text-cyan-400 shrink-0 font-bold">Task{idx + 1}:</span>
+                          <input
+                            type="text"
+                            value={t.text}
+                            onChange={(e) => updateTaskText(t.id, e.target.value)}
+                            className="flex-1 bg-transparent border-b border-transparent hover:border-slate-600 focus:border-cyan-500 font-mono text-slate-200 px-1 py-0.5 focus:outline-none transition-colors"
+                          />
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <select
+                              value={t.status}
+                              onChange={(e) => updateTaskStatus(t.id, e.target.value)}
+                              className={`text-[10px] px-2 py-1 rounded border font-semibold font-mono bg-slate-900 focus:outline-none ${
+                                t.status === 'done' ? 'text-emerald-400 border-emerald-800' :
+                                t.status === 'wip' ? 'text-amber-400 border-amber-800' : 'text-slate-400 border-slate-700'
+                              }`}
+                            >
+                              <option value="done">done</option>
+                              <option value="wip">wip</option>
+                              <option value="todo">Pending</option>
+                            </select>
+                            <button
+                              onClick={() => removeTask(t.id)}
+                              className="text-slate-500 hover:text-red-400 p-1 transition-colors cursor-pointer"
+                              title="Delete task"
+                            >
+                              <i className="fa-solid fa-trash-can text-xs"></i>
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Live Real-time Output Preview Box */}
+                <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 relative">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] uppercase font-bold tracking-wider text-cyan-400 flex items-center gap-1.5">
+                      <i className="fa-brands fa-microsoft"></i> Real-time Teams Preview
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono">Instant updates active</span>
+                  </div>
+                  <pre className="text-xs font-mono text-slate-300 whitespace-pre-wrap bg-slate-900/80 p-3.5 rounded-lg border border-slate-800/80 leading-relaxed select-all">
+{generateTeamsReport()}
+                  </pre>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 2: HISTORY VIEW */}
+            {activeView === 'history' && (
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+                  <div className="relative w-full sm:w-2/3">
+                    <i className="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-500 text-xs"></i>
+                    <input
+                      type="text"
+                      placeholder="Search history by project, date, or task..."
+                      value={historySearch}
+                      onChange={(e) => setHistorySearch(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  {history.length > 0 && (
+                    <button
+                      onClick={clearAllHistory}
+                      className="w-full sm:w-auto bg-red-950/40 hover:bg-red-900/60 text-red-400 border border-red-800/50 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <i className="fa-solid fa-trash-can"></i> Clear History
+                    </button>
+                  )}
+                </div>
+
+                <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+                  {filteredHistory.length === 0 ? (
+                    <div className="text-center py-12 text-slate-500 text-xs bg-slate-950/40 rounded-xl border border-slate-800">
+                      <i className="fa-solid fa-database text-2xl mb-2 block text-slate-600"></i>
+                      No saved history records found in IndexedDB.
+                    </div>
+                  ) : (
+                    filteredHistory.map((item) => (
+                      <div
+                        key={item.id}
+                        className="bg-slate-950/80 border border-slate-800 hover:border-slate-700 p-4 rounded-xl transition-all cursor-pointer group"
+                        onClick={() => loadHistoryRecord(item)}
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-indigo-400">
+                              {item.projectName || 'Unlabeled Project'}
+                            </span>
+                            <span className="text-[10px] font-mono text-cyan-400 bg-cyan-950/40 px-2 py-0.5 rounded border border-cyan-800/40">
+                              {item.date}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              {item.savedAt}
+                            </span>
+                            <button
+                              onClick={(e) => deleteHistoryRecord(item.id, e)}
+                              className="text-slate-500 hover:text-red-400 p-1 opacity-60 group-hover:opacity-100 transition-opacity"
+                              title="Delete entry from DB"
+                            >
+                              <i className="fa-solid fa-trash-can text-xs"></i>
+                            </button>
+                          </div>
+                        </div>
+
+                        <pre className="text-[11px] font-mono text-slate-300 bg-slate-900 p-2.5 rounded-lg border border-slate-800/80 whitespace-pre-wrap leading-tight">
+{item.formattedReport}
+                        </pre>
+
+                        <div className="mt-2 text-[10px] text-indigo-400 font-semibold group-hover:translate-x-1 transition-transform flex items-center gap-1">
+                          Click to load this record into Editor <i className="fa-solid fa-arrow-right"></i>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      ReactDOM.render(<TimesheetApp />, document.getElementById('timesheet-app-root'));
+    </script>
+</body>
+</html>
