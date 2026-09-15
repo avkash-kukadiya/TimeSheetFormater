@@ -2,32 +2,68 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Dynamic Daily Timesheet Reporter</title>
-    
+
     <!-- React & Tailwind Dependencies -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    
+
     <!-- PyScript / Pyodide Core for Browser-based Python Execution -->
     <link rel="stylesheet" href="https://pyscript.net/releases/2023.11.1/core.css">
     <script type="module" src="https://pyscript.net/releases/2023.11.1/core.js"></script>
 
     <style>
-        body {
+        :root {
+            color-scheme: dark;
+        }
+        html, body {
             margin: 0;
             padding: 0;
-            background-color: #0f172a;
+            background-color: #030712;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
             color: #f8fafc;
+            width: 100%;
+            min-height: 100dvh;
         }
+        /* Custom smooth scrollbars */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 999px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        @keyframes toast-in {
+            from { opacity: 0; transform: translateY(-10px) scale(0.95); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .toast-anim { animation: toast-in 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
+
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .glass-card {
+            background: rgba(30, 41, 59, 0.5);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        @keyframes pulse-subtle {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .animate-pulse-subtle { animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
     </style>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen flex items-center justify-center p-4">
-    <div id="timesheet-app-root" class="w-full"></div>
+<body class="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500 selection:text-white">
+    <div id="timesheet-app-root" class="w-full min-h-[100dvh]"></div>
 
     <!-- Python In-Browser Smart Parser Logic -->
     <script type="py">
@@ -39,7 +75,7 @@ def parse_timesheet_text(raw_text):
         return json.dumps({"date": None, "project": None, "tasks": []})
 
     lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-    
+
     extracted_date = None
     extracted_project = None
     tasks = []
@@ -79,7 +115,7 @@ def parse_timesheet_text(raw_text):
             is_task_like = re.search(r'[\(\[\-\:\,\s]+(done|completed|finished|wip|in progress|working|todo|pending)[\)\]\s]*$', line, re.IGNORECASE) or \
                            re.match(r'^\s*[\(\[]?\s*(done|completed|finished|wip|in progress|working|todo|pending)\s*[\)\]\:\-]', line, re.IGNORECASE) or \
                            re.match(r'^(?:task\s*\d*|[\d+\.\-\*\•\>])\s*[:\-]?\s*', line, re.IGNORECASE)
-            
+
             if not is_task_like and len(line.split()) >= 1 and not re.search(r'\d{1,4}[\/\-\.]\d{1,4}', line):
                 extracted_project = line.strip()
                 continue
@@ -138,7 +174,11 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
 
     <!-- React Application Code -->
     <script type="text/babel">
+      const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+      // ---------------------------------------------------------------------
       // IndexedDB Helper Utility
+      // ---------------------------------------------------------------------
       const DB_NAME = 'TimesheetAppDB';
       const DB_VERSION = 1;
       const STORE_NAME = 'history';
@@ -201,6 +241,22 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
         });
       };
 
+      // ---------------------------------------------------------------------
+      // Shared parsing helpers (used by the JS fallback parser)
+      // ---------------------------------------------------------------------
+      const STATUS_TERM_RE = '(done|completed|finish|finished|wip|in progress|working|todo|pending)';
+      const DONE_RE = /(done|completed|finish|finished)$/i;
+      const WIP_RE = /(wip|in progress|working)$/i;
+      const TODO_RE = /(todo|pending)$/i;
+
+      const classifyStatus = (term) => {
+        const t = term.toLowerCase();
+        if (DONE_RE.test(t)) return 'done';
+        if (WIP_RE.test(t)) return 'wip';
+        if (TODO_RE.test(t)) return 'todo';
+        return 'done';
+      };
+
       function TimesheetApp() {
         const getCurrentDateString = () => {
           const d = new Date();
@@ -209,46 +265,58 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
           return `${day}-${months[d.getMonth()]}-${d.getFullYear()}`;
         };
 
-        const getCurrentTimeString = () => {
-          return new Date().toLocaleTimeString();
-        };
+        const getCurrentTimeString = () => new Date().toLocaleTimeString();
 
-        const defaultTasks = [];
+        const [projectName, setProjectName] = useState('');
+        const [customDate, setCustomDate] = useState(getCurrentDateString());
+        const [currentTime, setCurrentTime] = useState(getCurrentTimeString());
+        const [tasks, setTasks] = useState([]);
+        const [inputTask, setInputTask] = useState('');
+        const [taskStatus, setTaskStatus] = useState('done');
+        const [copied, setCopied] = useState(false);
+        const [pastedText, setPastedText] = useState('');
+        const [isPythonReady, setIsPythonReady] = useState(false);
 
-        const [projectName, setProjectName] = React.useState('');
-        const [customDate, setCustomDate] = React.useState(getCurrentDateString());
-        const [currentTime, setCurrentTime] = React.useState(getCurrentTimeString());
-        const [tasks, setTasks] = React.useState(defaultTasks);
-        const [inputTask, setInputTask] = React.useState('');
-        const [taskStatus, setTaskStatus] = React.useState('done');
-        const [copied, setCopied] = React.useState(false);
-        const [pastedText, setPastedText] = React.useState('');
-        const [isPythonReady, setIsPythonReady] = React.useState(false);
+        // Saved Timesheet Edit Tracking State
+        const [editingRecordId, setEditingRecordId] = useState(null);
 
-        // History View States
-        const [activeView, setActiveView] = React.useState('editor'); // 'editor' | 'history'
-        const [history, setHistory] = React.useState([]);
-        const [historySearch, setHistorySearch] = React.useState('');
-        const [saveToast, setSaveToast] = React.useState(false);
+        // Task Item Edit Modal State
+        const [editingTask, setEditingTask] = useState(null); // null or { id, text, status }
 
-        const loadHistory = React.useCallback(async () => {
+        // Filter & Search tasks in editor
+        const [statusFilter, setStatusFilter] = useState('all');
+
+        // Validation & Notification States
+        const [errors, setErrors] = useState({});
+        const [toast, setToast] = useState({ show: false, message: '', type: 'info' });
+        const toastTimerRef = useRef(null);
+
+        // View & All Timesheets States
+        const [activeView, setActiveView] = useState('editor'); // 'editor' | 'allTimesheets'
+        const [allTimesheets, setAllTimesheets] = useState([]);
+        const [timesheetsSearch, setTimesheetsSearch] = useState('');
+
+        const triggerToast = useCallback((message, type = 'info') => {
+          if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+          setToast({ show: true, message, type });
+          toastTimerRef.current = setTimeout(() => setToast({ show: false, message: '', type: 'info' }), 3000);
+        }, []);
+
+        const loadAllTimesheets = useCallback(async () => {
           try {
             const records = await getAllRecordsFromDB();
             records.sort((a, b) => b.timestamp - a.timestamp);
-            setHistory(records);
+            setAllTimesheets(records);
           } catch (err) {
-            console.error("Failed to load history from IndexedDB:", err);
+            console.error("Failed to load timesheets from IndexedDB:", err);
           }
         }, []);
 
-        React.useEffect(() => {
-          loadHistory();
+        useEffect(() => {
+          loadAllTimesheets();
 
-          const timer = setInterval(() => {
-            setCurrentTime(getCurrentTimeString());
-          }, 1000);
+          const timer = setInterval(() => setCurrentTime(getCurrentTimeString()), 1000);
 
-          // Check periodically for PyScript initialization
           const checkPyReady = setInterval(() => {
             if (typeof window.pythonParseTimesheet === 'function') {
               setIsPythonReady(true);
@@ -259,40 +327,108 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
           return () => {
             clearInterval(timer);
             clearInterval(checkPyReady);
+            if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
           };
-        }, [loadHistory]);
+        }, [loadAllTimesheets]);
 
-        const addTask = (e) => {
+        // -------------------------------------------------------------------
+        // Form Validations
+        // -------------------------------------------------------------------
+        const validateField = useCallback((field, value) => {
+          setErrors(prev => {
+            const err = { ...prev };
+            if (field === 'date') {
+              if (!value || !value.trim()) err.date = 'Date cannot be empty.';
+              else delete err.date;
+            }
+            if (field === 'projectName') {
+              if (!value || !value.trim()) err.projectName = 'Project name is required.';
+              else delete err.projectName;
+            }
+            if (field === 'inputTask') {
+              if (!value || !value.trim()) err.inputTask = 'Task description cannot be empty.';
+              else delete err.inputTask;
+            }
+            return err;
+          });
+        }, []);
+
+        const validateForm = useCallback(() => {
+          const err = {};
+          if (!customDate || !customDate.trim()) err.date = 'Date is required.';
+          if (!projectName || !projectName.trim()) err.projectName = 'Project name is required.';
+          if (tasks.length === 0) err.tasks = 'At least one task must be added to export or save.';
+          setErrors(err);
+          return Object.keys(err).length === 0;
+        }, [customDate, projectName, tasks]);
+
+        const addTask = useCallback((e) => {
           e.preventDefault();
-          if (!inputTask.trim()) return;
-          setTasks([...tasks, { id: Date.now(), text: inputTask.trim(), status: taskStatus }]);
+          if (!inputTask.trim()) {
+            setErrors(prev => ({ ...prev, inputTask: 'Task description cannot be empty.' }));
+            return;
+          }
+          setTasks(prev => [...prev, { id: Date.now() + Math.random(), text: inputTask.trim(), status: taskStatus }]);
           setInputTask('');
-        };
+          setErrors(prev => {
+            const newErr = { ...prev };
+            delete newErr.inputTask;
+            delete newErr.tasks;
+            return newErr;
+          });
+          triggerToast('Task added successfully!', 'success');
+        }, [inputTask, taskStatus, triggerToast]);
 
-        const updateTaskText = (id, newText) => {
-          setTasks(tasks.map(t => t.id === id ? { ...t, text: newText } : t));
-        };
+        const updateTaskText = useCallback((id, newText) => {
+          setTasks(prev => prev.map(t => t.id === id ? { ...t, text: newText } : t));
+        }, []);
 
-        const updateTaskStatus = (id, newStatus) => {
-          setTasks(tasks.map(t => t.id === id ? { ...t, status: newStatus } : t));
-        };
+        const updateTaskStatus = useCallback((id, newStatus) => {
+          setTasks(prev => prev.map(t => t.id === id ? { ...t, status: newStatus } : t));
+        }, []);
 
-        const removeTask = (id) => {
-          setTasks(tasks.filter(t => t.id !== id));
-        };
+        const removeTask = useCallback((id) => {
+          setTasks(prev => prev.filter(t => t.id !== id));
+          triggerToast('Task removed', 'info');
+        }, [triggerToast]);
 
-        const resetTimesheet = () => {
+        // Explicit Task Edit Modal Handlers
+        const openEditModal = useCallback((task) => {
+          setEditingTask({ ...task });
+        }, []);
+
+        const saveEditedTask = useCallback(() => {
+          if (!editingTask || !editingTask.text.trim()) return;
+          setTasks(prev => prev.map(t => t.id === editingTask.id ? editingTask : t));
+          setEditingTask(null);
+          triggerToast('Task updated!', 'success');
+        }, [editingTask, triggerToast]);
+
+        const resetTimesheet = useCallback(() => {
           setCustomDate(getCurrentDateString());
           setProjectName('');
           setTasks([]);
           setInputTask('');
           setTaskStatus('done');
           setPastedText('');
-        };
+          setEditingRecordId(null);
+          setErrors({});
+          triggerToast('Timesheet reset successfully.', 'info');
+        }, [triggerToast]);
 
-        // Smart Import using Browser-embedded Python engine with fallback
-        const parseTextToTimesheet = () => {
-          if (!pastedText.trim()) return;
+        // -------------------------------------------------------------------
+        // Smart Import using Browser-embedded Python engine with JS fallback
+        // -------------------------------------------------------------------
+        const parseTextToTimesheet = useCallback(() => {
+          if (!pastedText.trim()) {
+            setErrors(prev => ({ ...prev, pastedText: 'Please enter or paste text to parse.' }));
+            return;
+          }
+          setErrors(prev => {
+            const copy = { ...prev };
+            delete copy.pastedText;
+            return copy;
+          });
 
           let parsedResult = null;
 
@@ -306,9 +442,15 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
           }
 
           if (parsedResult) {
-            if (parsedResult.date) setCustomDate(parsedResult.date);
-            if (parsedResult.project) setProjectName(parsedResult.project);
-            
+            if (parsedResult.date) {
+              setCustomDate(parsedResult.date);
+              setErrors(prev => { const e = { ...prev }; delete e.date; return e; });
+            }
+            if (parsedResult.project) {
+              setProjectName(parsedResult.project);
+              setErrors(prev => { const e = { ...prev }; delete e.projectName; return e; });
+            }
+
             if (parsedResult.tasks && parsedResult.tasks.length > 0) {
               const mappedTasks = parsedResult.tasks.map(t => ({
                 id: Date.now() + Math.random(),
@@ -317,9 +459,13 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
               }));
               setTasks(prev => [...prev, ...mappedTasks]);
               setPastedText('');
+              setErrors(prev => { const e = { ...prev }; delete e.tasks; return e; });
+              triggerToast('Text imported successfully via Python engine!', 'success');
+            } else {
+              triggerToast('No tasks detected in the pasted text.', 'error');
             }
           } else {
-            // JS Fallback in case Python engine hasn't fully loaded yet
+            // JS Fallback
             const lines = pastedText.split('\n').map(l => l.trim()).filter(Boolean);
             const newTasks = [];
 
@@ -337,10 +483,10 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
               }
 
               if (idx === 0 && lines.length > 1) {
-                const isTaskLike = /^(Task\s*\d*|[\d+\.\-\*\•\>])\s*[:\-]?\s*/i.test(line) ||
-                                   /[\-\:]?\s*(done|completed|finish|finished|wip|in progress|working|todo|pending)$/i.test(line);
+                const isTaskLike = new RegExp(`^(Task\\s*\\d*|[\\d+\\.\\-\\*\\•\\>])\\s*[:\\-]?\\s*`, 'i').test(line) ||
+                                   new RegExp(`[\\-\\:]?\\s*${STATUS_TERM_RE}$`, 'i').test(line);
                 if (!isTaskLike) {
-                  setProjectName(line.strip ? line.strip() : line.trim());
+                  setProjectName(line.trim());
                   return;
                 }
               }
@@ -349,16 +495,10 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
 
               let status = 'done';
               let cleanedLine = line;
-
-              if (/[\-\:]?\s*(done|completed|finish|finished)$/i.test(cleanedLine)) {
-                status = 'done';
-                cleanedLine = cleanedLine.replace(/[\-\:]?\s*(done|completed|finish|finished)$/i, '');
-              } else if (/[\-\:]?\s*(wip|in progress|working)$/i.test(cleanedLine)) {
-                status = 'wip';
-                cleanedLine = cleanedLine.replace(/[\-\:]?\s*(wip|in progress|working)$/i, '');
-              } else if (/[\-\:]?\s*(todo|pending)$/i.test(cleanedLine)) {
-                status = 'todo';
-                cleanedLine = cleanedLine.replace(/[\-\:]?\s*(todo|pending)$/i, '');
+              const trailingStatusMatch = cleanedLine.match(new RegExp(`[\\-\\:]?\\s*${STATUS_TERM_RE}$`, 'i'));
+              if (trailingStatusMatch) {
+                status = classifyStatus(trailingStatusMatch[1]);
+                cleanedLine = cleanedLine.replace(trailingStatusMatch[0], '');
               }
 
               cleanedLine = cleanedLine.replace(/^(Task\s*\d*\s*[:\-]?\s*|[\d+\.\-\*\•]\s*)/i, '').trim();
@@ -375,31 +515,49 @@ js.window.pythonParseTimesheet = create_proxy(parse_timesheet_text)
             if (newTasks.length > 0) {
               setTasks(prev => [...prev, ...newTasks]);
               setPastedText('');
+              setErrors(prev => { const e = { ...prev }; delete e.tasks; return e; });
+              triggerToast('Text imported successfully via Fallback JS!', 'success');
+            } else {
+              triggerToast('No valid tasks extracted from text.', 'error');
             }
           }
-        };
+        }, [pastedText, triggerToast]);
 
-        const generateTeamsReport = () => {
+        const generateTeamsReport = useCallback(() => {
           const taskLines = tasks.map((t, idx) => `Task${idx + 1}: ${t.text} -${t.status}`).join('\n');
           return `Date: ${customDate}
 Project Name: ${projectName}
 TasksUpdate:
 ${taskLines}`;
-        };
+        }, [tasks, customDate, projectName]);
 
-        const copyToClipboard = () => {
+        const reportPreview = useMemo(() => generateTeamsReport(), [generateTeamsReport]);
+
+        const copyToClipboard = useCallback(() => {
+          if (!validateForm()) {
+            triggerToast('Please correct validation errors before copying.', 'error');
+            return;
+          }
           const report = generateTeamsReport();
           navigator.clipboard.writeText(report).then(() => {
             setCopied(true);
+            triggerToast('Copied Teams report to clipboard!', 'success');
             setTimeout(() => setCopied(false), 2000);
           });
-        };
+        }, [validateForm, generateTeamsReport, triggerToast]);
 
-        // Save current timesheet entry to IndexedDB
-        const saveCurrentToHistory = async () => {
-          if (!projectName.trim() && tasks.length === 0) return;
+        // Save or Update Timesheet in IndexedDB
+        const saveOrUpdateTimesheet = useCallback(async (forceNew = false) => {
+          if (!validateForm()) {
+            triggerToast('Please complete required fields before saving.', 'error');
+            return;
+          }
+
+          const isUpdating = !forceNew && !!editingRecordId;
+          const targetId = isUpdating ? editingRecordId : ('ts_' + Date.now());
+
           const record = {
-            id: 'ts_' + Date.now(),
+            id: targetId,
             timestamp: Date.now(),
             savedAt: new Date().toLocaleString(),
             date: customDate,
@@ -407,347 +565,580 @@ ${taskLines}`;
             tasks: tasks,
             formattedReport: generateTeamsReport()
           };
-          await saveRecordToDB(record);
-          await loadHistory();
-          setSaveToast(true);
-          setTimeout(() => setSaveToast(false), 2500);
-        };
 
-        // Load a record from history into active editor
-        const loadHistoryRecord = (record) => {
+          await saveRecordToDB(record);
+          await loadAllTimesheets();
+          setEditingRecordId(targetId);
+
+          if (isUpdating) {
+            triggerToast('Timesheet updated successfully!', 'success');
+          } else {
+            triggerToast('Saved timesheet to All Timesheets!', 'success');
+          }
+          resetTimesheet();
+        }, [validateForm, editingRecordId, customDate, projectName, tasks, generateTeamsReport, loadAllTimesheets, triggerToast]);
+
+        const loadTimesheetRecordForEdit = useCallback((record) => {
           setCustomDate(record.date || getCurrentDateString());
           setProjectName(record.projectName || '');
           setTasks(record.tasks || []);
+          setEditingRecordId(record.id);
           setActiveView('editor');
-        };
+          setErrors({});
+          triggerToast(`Loaded "${record.projectName || 'Timesheet'}" for editing!`, 'info');
+        }, [triggerToast]);
 
-        // Delete single entry from history
-        const deleteHistoryRecord = async (id, e) => {
+        const deleteTimesheetRecord = useCallback(async (id, e) => {
           e.stopPropagation();
           await deleteRecordFromDB(id);
-          await loadHistory();
-        };
-
-        // Clear all history
-        const clearAllHistory = async () => {
-          if (window.confirm("Are you sure you want to clear all saved history from IndexedDB?")) {
-            await clearAllRecordsFromDB();
-            await loadHistory();
+          await loadAllTimesheets();
+          if (editingRecordId === id) {
+            setEditingRecordId(null);
           }
-        };
+          triggerToast('Timesheet record deleted.', 'info');
+        }, [loadAllTimesheets, editingRecordId, triggerToast]);
 
-        // Filtered history list
-        const filteredHistory = history.filter(item => {
-          const term = historySearch.toLowerCase();
-          const matchProj = (item.projectName || '').toLowerCase().includes(term);
-          const matchDate = (item.date || '').toLowerCase().includes(term);
-          const matchTasks = (item.tasks || []).some(t => t.text.toLowerCase().includes(term));
-          return matchProj || matchDate || matchTasks;
-        });
+        const clearAllTimesheetsRecords = useCallback(async () => {
+          if (window.confirm("Are you sure you want to clear all saved timesheets from IndexedDB?")) {
+            await clearAllRecordsFromDB();
+            await loadAllTimesheets();
+            setEditingRecordId(null);
+            triggerToast('All timesheets cleared.', 'info');
+          }
+        }, [loadAllTimesheets, triggerToast]);
+
+        const filteredTasks = useMemo(() => {
+          if (statusFilter === 'all') return tasks;
+          return tasks.filter(t => t.status === statusFilter);
+        }, [tasks, statusFilter]);
+
+        const filteredTimesheets = useMemo(() => {
+          const term = timesheetsSearch.toLowerCase();
+          if (!term) return allTimesheets;
+          return allTimesheets.filter(item => {
+            const matchProj = (item.projectName || '').toLowerCase().includes(term);
+            const matchDate = (item.date || '').toLowerCase().includes(term);
+            const matchTasks = (item.tasks || []).some(t => t.text.toLowerCase().includes(term));
+            return matchProj || matchDate || matchTasks;
+          });
+        }, [allTimesheets, timesheetsSearch]);
+
+        const badgeStyles = {
+          done: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+          wip: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+          todo: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/30',
+        };
 
         return (
-          <div className="max-w-2xl mx-auto p-6 bg-slate-900 text-slate-100 rounded-2xl shadow-2xl border border-slate-800 font-sans my-4 relative">
-            
-            {/* Save Toast Notification */}
-            {saveToast && (
-              <div className="absolute top-4 right-6 bg-emerald-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-lg flex items-center gap-1.5 z-50 animate-bounce">
-                <i className="fa-solid fa-cloud-arrow-up"></i> Saved to IndexedDB!
-              </div>
-            )}
+          <div className="w-full min-h-[100dvh] mx-auto max-w-[1700px] flex flex-col p-3 sm:p-5 lg:p-8">
+            <div className="w-full flex-1 flex flex-col bg-slate-900/90 text-slate-100 rounded-2xl shadow-2xl border border-slate-800 font-sans relative overflow-hidden backdrop-blur-xl">
 
-            {/* Header with Real-Time Clock & View Switcher */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 pb-4 border-b border-slate-800">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-cyan-400 to-emerald-400">
-                    <i className="fa-solid fa-bolt mr-1.5 text-cyan-400"></i> REAL-TIME TIMESHEET
-                  </h1>
-                  <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> LIVE
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400 mt-0.5">Instant editable updates with live preview, IndexedDB storage & Teams output.</p>
-              </div>
-
-              {/* Navigation View Switcher */}
-              <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 w-full sm:w-auto">
-                <button
-                  onClick={() => setActiveView('editor')}
-                  className={`flex-1 sm:flex-none px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                    activeView === 'editor'
-                      ? 'bg-indigo-600 text-white shadow'
-                      : 'text-slate-400 hover:text-slate-200'
+              {/* Toast Notification */}
+              {toast.show && (
+                <div
+                  role="status"
+                  className={`toast-anim fixed top-4 left-1/2 -translate-x-1/2 sm:left-auto sm:translate-x-0 sm:right-6 max-w-[92vw] sm:max-w-md px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 z-50 text-xs font-semibold border backdrop-blur-md ${
+                    toast.type === 'success' ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/40 shadow-emerald-950/50' :
+                    toast.type === 'error' ? 'bg-rose-950/90 text-rose-200 border-rose-500/40 shadow-rose-950/50' :
+                    'bg-indigo-950/90 text-indigo-200 border-indigo-500/40 shadow-indigo-950/50'
                   }`}
                 >
-                  <i className="fa-solid fa-pen-to-square"></i> Editor
-                </button>
-                <button
-                  onClick={() => setActiveView('history')}
-                  className={`flex-1 sm:flex-none px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                    activeView === 'history'
-                      ? 'bg-indigo-600 text-white shadow'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <i className="fa-solid fa-clock-rotate-left"></i> History ({history.length})
-                </button>
-              </div>
-            </div>
-
-            {/* TAB 1: EDITOR VIEW */}
-            {activeView === 'editor' && (
-              <div>
-                {/* Action Buttons */}
-                <div className="flex items-center gap-2 mb-6 justify-end">
-                  <button
-                    onClick={saveCurrentToHistory}
-                    className="bg-slate-800 hover:bg-emerald-950/50 text-slate-300 hover:text-emerald-400 border border-slate-700 hover:border-emerald-800/60 font-semibold px-3 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                    title="Save current timesheet record to IndexedDB history"
-                  >
-                    <i className="fa-solid fa-floppy-disk"></i> Save to DB
-                  </button>
-                  <button
-                    onClick={resetTimesheet}
-                    className="bg-slate-800 hover:bg-red-950/40 text-slate-300 hover:text-red-400 border border-slate-700 hover:border-red-800/50 font-semibold px-3 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                    title="Clear all tasks and reset fields"
-                  >
-                    <i className="fa-solid fa-rotate-left"></i> Reset
-                  </button>
-                  <button
-                    onClick={copyToClipboard}
-                    className="bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 shadow-lg shadow-cyan-900/40 cursor-pointer"
-                  >
-                    <i className={`fa-solid ${copied ? 'fa-check' : 'fa-copy'}`}></i>
-                    {copied ? 'Copied!' : 'Copy Teams Format'}
-                  </button>
+                  <i className={`fa-solid ${
+                    toast.type === 'success' ? 'fa-circle-check text-emerald-400 text-base' :
+                    toast.type === 'error' ? 'fa-triangle-exclamation text-rose-400 text-base' :
+                    'fa-circle-info text-indigo-400 text-base'
+                  }`}></i>
+                  <span className="truncate">{toast.message}</span>
                 </div>
+              )}
 
-                {/* Dynamic Config Bar (Date, Project, Live Time) */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800">
-                  <div>
-                    <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Date</label>
-                    <input
-                      type="text"
-                      value={customDate}
-                      onChange={(e) => setCustomDate(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-cyan-400 font-mono font-semibold focus:outline-none focus:border-cyan-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Project Name</label>
-                    <input
-                      type="text"
-                      value={projectName}
-                      onChange={(e) => setProjectName(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-indigo-400 font-semibold focus:outline-none focus:border-cyan-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Current Time</label>
-                    <div className="w-full bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-emerald-400 font-mono flex items-center justify-between">
-                      <span>{currentTime}</span>
-                      <i className="fa-regular fa-clock text-slate-500"></i>
+              {/* Edit Task Modal */}
+              {editingTask && (
+                <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                  <div className="glass-panel w-full max-w-lg rounded-2xl p-5 border border-slate-700 shadow-2xl space-y-4 animate-toast-in">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                      <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                        <i className="fa-solid fa-pen-to-square text-cyan-400"></i> Edit Task Entry
+                      </h3>
+                      <button 
+                        onClick={() => setEditingTask(null)}
+                        className="text-slate-400 hover:text-slate-200 text-sm transition-colors"
+                      >
+                        <i className="fa-solid fa-xmark"></i>
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
+                          Task Description
+                        </label>
+                        <textarea
+                          rows="3"
+                          value={editingTask.text}
+                          onChange={(e) => setEditingTask({ ...editingTask, text: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-cyan-500 transition-colors resize-y"
+                        ></textarea>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
+                          Status Tag
+                        </label>
+                        <select
+                          value={editingTask.status}
+                          onChange={(e) => setEditingTask({ ...editingTask, status: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-700 text-xs text-slate-200 rounded-xl px-3 py-2 focus:outline-none focus:border-cyan-500"
+                        >
+                          <option value="done">done</option>
+                          <option value="wip">wip</option>
+                          <option value="todo">Pending (todo)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                      <button
+                        onClick={() => setEditingTask(null)}
+                        className="px-3.5 py-1.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold transition-all"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={saveEditedTask}
+                        className="px-4 py-1.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold transition-all shadow-lg shadow-cyan-950/50"
+                      >
+                        Save Changes
+                      </button>
                     </div>
                   </div>
                 </div>
+              )}
 
-                {/* Text to Timesheet Converter */}
-                <div className="mb-6 bg-slate-950/40 p-3.5 rounded-xl border border-indigo-900/40">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-xs font-bold text-indigo-400 flex items-center gap-1.5">
-                      <i className="fa-solid fa-wand-magic-sparkles"></i> Text to Timesheet (Smart Import)
-                    </label>
-                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
-                      isPythonReady 
-                        ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30' 
-                        : 'bg-slate-800 text-slate-500'
-                    }`}>
-                      <i className="fa-brands fa-python mr-1"></i>
-                      {isPythonReady ? 'Python Engine Ready' : 'Loading Python Engine...'}
+              {/* Header */}
+              <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 px-4 py-4 sm:px-6 sm:py-5 lg:px-8 border-b border-slate-800 shrink-0 bg-slate-950/40">
+                <div className="space-y-1 min-w-0">
+                  <div className="flex items-center flex-wrap gap-2.5">
+                    <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-indigo-300 to-emerald-400">
+                      <i className="fa-solid fa-bolt mr-2 text-cyan-400"></i>TIMESHEET REPORTER
+                    </h1>
+                    <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[11px] font-mono px-2.5 py-0.5 rounded-full flex items-center gap-1.5 shrink-0">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> LIVE
                     </span>
                   </div>
-                  <textarea
-                    rows="3"
-                    value={pastedText}
-                    onChange={(e) => setPastedText(e.target.value)}
-                    placeholder="Paste raw notes, bullet points, free text, or existing timesheets in any format..."
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono mb-2"
-                  ></textarea>
-                  <button
-                    type="button"
-                    onClick={parseTextToTimesheet}
-                    className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-4 py-1.5 rounded-lg text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow"
-                  >
-                    <i className="fa-solid fa-arrows-rotate"></i> Convert & Import Text
-                  </button>
+                  <p className="text-xs text-slate-400">Real-time dynamic updates, MS Teams report generator, PyScript parser & IndexedDB local storage.</p>
                 </div>
 
-                {/* Quick Add Form */}
-                <form onSubmit={addTask} className="space-y-2 mb-6 bg-slate-800/40 p-3.5 rounded-xl border border-slate-700/60">
-                  <label className="block text-xs font-semibold text-slate-300">Add New Task Entry</label>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="text"
-                      value={inputTask}
-                      onChange={(e) => setInputTask(e.target.value)}
-                      placeholder="e.g. Implement real-time updates and reset functionality"
-                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                    />
-                    <select
-                      value={taskStatus}
-                      onChange={(e) => setTaskStatus(e.target.value)}
-                      className="bg-slate-900 border border-slate-700 text-xs text-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-500"
-                    >
-                      <option value="done">-done</option>
-                      <option value="wip">-wip</option>
-                      <option value="todo">--Pending</option>
-                    </select>
-                    <button
-                      type="submit"
-                      className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-2 rounded-lg text-xs transition-all cursor-pointer shadow"
-                    >
-                      <i className="fa-solid fa-plus mr-1"></i> Add
-                    </button>
-                  </div>
-                </form>
+                {/* View Tabs */}
+                <div className="flex items-center bg-slate-950/80 p-1.5 rounded-xl border border-slate-800 w-full md:w-auto shrink-0 shadow-inner">
+                  <button
+                    onClick={() => setActiveView('editor')}
+                    className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                      activeView === 'editor' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/50' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <i className="fa-solid fa-pen-to-square"></i> Live Editor
+                  </button>
+                  <button
+                    onClick={() => setActiveView('allTimesheets')}
+                    className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                      activeView === 'allTimesheets' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/50' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <i className="fa-solid fa-clock-rotate-left"></i> All Timesheets ({allTimesheets.length})
+                  </button>
+                </div>
+              </div>
 
-                {/* Realtime Editable Tasks List */}
-                <div className="mb-6">
-                  <div className="flex items-center justify-between mb-2">
-                    <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">Live Editable Tasks ({tasks.length})</h2>
-                    <span className="text-[10px] text-slate-500">Click task text directly to edit in real time</span>
-                  </div>
-                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                    {tasks.length === 0 ? (
-                      <div className="text-center py-8 text-slate-500 text-xs bg-slate-950/40 rounded-xl border border-slate-800/80">
-                        <i className="fa-regular fa-folder-open text-xl mb-1.5 block text-slate-600"></i>
-                        No tasks logged. Add a new task, paste text, or hit <strong className="text-slate-400">Reset</strong>.
+              {/* Scrollable Workspace */}
+              <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+
+                {/* VIEW 1: EDITOR */}
+                {activeView === 'editor' && (
+                  <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px] xl:grid-cols-[minmax(0,1fr)_460px] gap-6 items-start">
+
+                    {/* Left Column Controls */}
+                    <div className="space-y-6 min-w-0">
+                      
+                      {/* Active Timesheet Edit Indicator Banner */}
+                      {editingRecordId && (
+                        <div className="flex items-center justify-between bg-amber-950/40 border border-amber-500/40 text-amber-200 px-4 py-2.5 rounded-2xl text-xs font-semibold shadow-md">
+                          <div className="flex items-center gap-2 truncate">
+                            <i className="fa-solid fa-pen-to-square text-amber-400"></i>
+                            <span>Editing Saved Timesheet (<span className="font-mono">{editingRecordId}</span>)</span>
+                          </div>
+                          <button
+                            onClick={() => {setEditingRecordId(null),resetTimesheet()}}
+                            className="text-amber-400 hover:text-amber-200 font-bold hover:underline text-xs shrink-0 cursor-pointer ml-2"
+                            title="Unlink and save as new timesheet"
+                          >
+                            <i className="fa-solid fa-xmark mr-1"></i> New Mode
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Top Action Toolbar */}
+                      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-950/50 p-3 rounded-2xl border border-slate-800">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
+                          <i className="fa-solid fa-sliders text-indigo-400"></i> Actions Bar
+                        </div>
+                        <div className="flex items-center flex-wrap gap-2 w-full sm:w-auto">
+                          {editingRecordId ? (
+                            <>
+                              <button
+                                onClick={() => saveOrUpdateTimesheet(false)}
+                                className="flex-1 sm:flex-none bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold px-3.5 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-amber-950/50"
+                                title="Update this existing timesheet record"
+                              >
+                                <i className="fa-solid fa-arrows-rotate"></i> Update Timesheet
+                              </button>
+                              <button
+                                onClick={() => saveOrUpdateTimesheet(true)}
+                                className="flex-1 sm:flex-none bg-slate-800 hover:bg-emerald-950/50 text-slate-300 hover:text-emerald-400 border border-slate-700 hover:border-emerald-800/60 font-semibold px-3.5 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                                title="Save as a new timesheet record"
+                              >
+                                <i className="fa-solid fa-plus"></i> Save as New
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => saveOrUpdateTimesheet(false)}
+                              className="flex-1 sm:flex-none bg-slate-800 hover:bg-emerald-950/50 text-slate-300 hover:text-emerald-400 border border-slate-700 hover:border-emerald-800/60 font-semibold px-3.5 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                              title="Save current report to IndexedDB All Timesheets"
+                            >
+                              <i className="fa-solid fa-floppy-disk"></i> Save Timesheet
+                            </button>
+                          )}
+                          <button
+                            onClick={resetTimesheet}
+                            className="flex-1 sm:flex-none bg-slate-800 hover:bg-rose-950/40 text-slate-300 hover:text-rose-400 border border-slate-700 hover:border-rose-800/50 font-semibold px-3.5 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                            title="Clear all fields"
+                          >
+                            <i className="fa-solid fa-rotate-left"></i> Reset
+                          </button>
+                          <button
+                            onClick={copyToClipboard}
+                            className="flex-1 sm:flex-none bg-gradient-to-r from-cyan-400 to-blue-500 hover:from-cyan-300 hover:to-blue-400 text-slate-950 font-extrabold px-4 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-1.5 shadow-md shadow-cyan-950/50 cursor-pointer"
+                          >
+                            <i className={`fa-solid ${copied ? 'fa-check' : 'fa-copy'}`}></i>
+                            {copied ? 'Copied!' : 'Copy Teams'}
+                          </button>
+                        </div>
                       </div>
-                    ) : (
-                      tasks.map((t, idx) => (
-                        <div key={t.id} className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/50 border border-slate-700/60 text-xs gap-2">
-                          <span className="font-mono text-cyan-400 shrink-0 font-bold">Task{idx + 1}:</span>
+
+                      {/* Config & Inputs Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 bg-slate-950/50 p-4 rounded-2xl border border-slate-800">
+                        <div>
+                          <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1.5">
+                            Date <span className="text-rose-400">*</span>
+                          </label>
                           <input
                             type="text"
-                            value={t.text}
-                            onChange={(e) => updateTaskText(t.id, e.target.value)}
-                            className="flex-1 bg-transparent border-b border-transparent hover:border-slate-600 focus:border-cyan-500 font-mono text-slate-200 px-1 py-0.5 focus:outline-none transition-colors"
+                            value={customDate}
+                            onChange={(e) => { setCustomDate(e.target.value); validateField('date', e.target.value); }}
+                            className={`w-full bg-slate-900 border ${errors.date ? 'border-rose-500' : 'border-slate-700'} rounded-xl px-3 py-2 text-xs text-cyan-400 font-mono font-bold focus:outline-none focus:border-cyan-500 transition-colors shadow-inner`}
                           />
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <select
-                              value={t.status}
-                              onChange={(e) => updateTaskStatus(t.id, e.target.value)}
-                              className={`text-[10px] px-2 py-1 rounded border font-semibold font-mono bg-slate-900 focus:outline-none ${
-                                t.status === 'done' ? 'text-emerald-400 border-emerald-800' :
-                                t.status === 'wip' ? 'text-amber-400 border-amber-800' : 'text-slate-400 border-slate-700'
-                              }`}
-                            >
-                              <option value="done">done</option>
-                              <option value="wip">wip</option>
-                              <option value="todo">Pending</option>
-                            </select>
-                            <button
-                              onClick={() => removeTask(t.id)}
-                              className="text-slate-500 hover:text-red-400 p-1 transition-colors cursor-pointer"
-                              title="Delete task"
-                            >
-                              <i className="fa-solid fa-trash-can text-xs"></i>
-                            </button>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                {/* Live Real-time Output Preview Box */}
-                <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 relative">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-[10px] uppercase font-bold tracking-wider text-cyan-400 flex items-center gap-1.5">
-                      <i className="fa-brands fa-microsoft"></i> Real-time Teams Preview
-                    </span>
-                    <span className="text-[10px] text-slate-500 font-mono">Instant updates active</span>
-                  </div>
-                  <pre className="text-xs font-mono text-slate-300 whitespace-pre-wrap bg-slate-900/80 p-3.5 rounded-lg border border-slate-800/80 leading-relaxed select-all">
-{generateTeamsReport()}
-                  </pre>
-                </div>
-              </div>
-            )}
-
-            {/* TAB 2: HISTORY VIEW */}
-            {activeView === 'history' && (
-              <div className="space-y-4">
-                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-950/60 p-3 rounded-xl border border-slate-800">
-                  <div className="relative w-full sm:w-2/3">
-                    <i className="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-500 text-xs"></i>
-                    <input
-                      type="text"
-                      placeholder="Search history by project, date, or task..."
-                      value={historySearch}
-                      onChange={(e) => setHistorySearch(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  {history.length > 0 && (
-                    <button
-                      onClick={clearAllHistory}
-                      className="w-full sm:w-auto bg-red-950/40 hover:bg-red-900/60 text-red-400 border border-red-800/50 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <i className="fa-solid fa-trash-can"></i> Clear History
-                    </button>
-                  )}
-                </div>
-
-                <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
-                  {filteredHistory.length === 0 ? (
-                    <div className="text-center py-12 text-slate-500 text-xs bg-slate-950/40 rounded-xl border border-slate-800">
-                      <i className="fa-solid fa-database text-2xl mb-2 block text-slate-600"></i>
-                      No saved history records found in IndexedDB.
-                    </div>
-                  ) : (
-                    filteredHistory.map((item) => (
-                      <div
-                        key={item.id}
-                        className="bg-slate-950/80 border border-slate-800 hover:border-slate-700 p-4 rounded-xl transition-all cursor-pointer group"
-                        onClick={() => loadHistoryRecord(item)}
-                      >
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-indigo-400">
-                              {item.projectName || 'Unlabeled Project'}
-                            </span>
-                            <span className="text-[10px] font-mono text-cyan-400 bg-cyan-950/40 px-2 py-0.5 rounded border border-cyan-800/40">
-                              {item.date}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] text-slate-500 font-mono">
-                              {item.savedAt}
-                            </span>
-                            <button
-                              onClick={(e) => deleteHistoryRecord(item.id, e)}
-                              className="text-slate-500 hover:text-red-400 p-1 opacity-60 group-hover:opacity-100 transition-opacity"
-                              title="Delete entry from DB"
-                            >
-                              <i className="fa-solid fa-trash-can text-xs"></i>
-                            </button>
-                          </div>
+                          {errors.date && <p className="text-rose-400 text-[10px] mt-1 font-semibold">{errors.date}</p>}
                         </div>
 
-                        <pre className="text-[11px] font-mono text-slate-300 bg-slate-900 p-2.5 rounded-lg border border-slate-800/80 whitespace-pre-wrap leading-tight">
-{item.formattedReport}
-                        </pre>
+                        <div>
+                          <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1.5">
+                            Project Name <span className="text-rose-400">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            value={projectName}
+                            onChange={(e) => { setProjectName(e.target.value); validateField('projectName', e.target.value); }}
+                            placeholder="e.g. CIU Consumer investigation"
+                            className={`w-full bg-slate-900 border ${errors.projectName ? 'border-rose-500' : 'border-slate-700'} rounded-xl px-3 py-2 text-xs text-indigo-300 font-semibold focus:outline-none focus:border-cyan-500 transition-colors shadow-inner`}
+                          />
+                          {errors.projectName && <p className="text-rose-400 text-[10px] mt-1 font-semibold">{errors.projectName}</p>}
+                        </div>
 
-                        <div className="mt-2 text-[10px] text-indigo-400 font-semibold group-hover:translate-x-1 transition-transform flex items-center gap-1">
-                          Click to load this record into Editor <i className="fa-solid fa-arrow-right"></i>
+                        <div className="sm:col-span-2 xl:col-span-1">
+                          <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1.5">Live Time</label>
+                          <div className="w-full bg-slate-900/80 border border-slate-800 rounded-xl px-3 py-2 text-xs text-emerald-400 font-mono flex items-center justify-between shadow-inner">
+                            <span className="font-semibold">{currentTime}</span>
+                            <i className="fa-regular fa-clock text-slate-500"></i>
+                          </div>
                         </div>
                       </div>
-                    ))
-                  )}
-                </div>
+
+                      {/* Smart Parser Card */}
+                      <div className="glass-card p-4 rounded-2xl space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <label className="text-xs font-bold text-indigo-300 flex items-center gap-2">
+                            <i className="fa-solid fa-wand-magic-sparkles text-amber-400"></i> Smart Text Import
+                          </label>
+                          <span className={`self-start sm:self-auto text-[10px] font-mono px-2.5 py-0.5 rounded-full border ${
+                            isPythonReady ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-slate-800 text-slate-500 border-slate-700'
+                          }`}>
+                            <i className="fa-brands fa-python mr-1"></i>
+                            {isPythonReady ? 'PyScript Engine Ready' : 'Loading Engine...'}
+                          </span>
+                        </div>
+                        <textarea
+                          rows="3"
+                          value={pastedText}
+                          onChange={(e) => {
+                            setPastedText(e.target.value);
+                            if (errors.pastedText) setErrors(prev => { const c = { ...prev }; delete c.pastedText; return c; });
+                          }}
+                          placeholder="Paste notes or unstructured text here. PyScript automatically formats projects, dates, and tasks..."
+                          className={`w-full bg-slate-950 border ${errors.pastedText ? 'border-rose-500' : 'border-slate-700'} rounded-xl p-3 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono transition-colors resize-y`}
+                        ></textarea>
+                        {errors.pastedText && <p className="text-rose-400 text-[10px] font-semibold">{errors.pastedText}</p>}
+                        <button
+                          type="button"
+                          onClick={parseTextToTimesheet}
+                          className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2 rounded-xl text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md shadow-indigo-950/50"
+                        >
+                          <i className="fa-solid fa-arrows-rotate"></i> Parse & Append Text
+                        </button>
+                      </div>
+
+                      {/* Add Task Form */}
+                      <form onSubmit={addTask} className="glass-card p-4 rounded-2xl space-y-3">
+                        <label className="block text-xs font-bold text-slate-200">
+                          Add Task Item <span className="text-rose-400">*</span>
+                        </label>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <input
+                            type="text"
+                            value={inputTask}
+                            onChange={(e) => { setInputTask(e.target.value); validateField('inputTask', e.target.value); }}
+                            placeholder="Enter task detail..."
+                            className={`flex-1 min-w-0 bg-slate-950 border ${errors.inputTask ? 'border-rose-500' : 'border-slate-700'} rounded-xl px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors`}
+                          />
+                          <select
+                            value={taskStatus}
+                            onChange={(e) => setTaskStatus(e.target.value)}
+                            className="bg-slate-950 border border-slate-700 text-xs text-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:border-cyan-500 shrink-0 font-semibold"
+                          >
+                            <option value="done">-done</option>
+                            <option value="wip">-wip</option>
+                            <option value="todo">--Pending</option>
+                          </select>
+                          <button
+                            type="submit"
+                            className="bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition-all cursor-pointer shadow-md shadow-cyan-950/50 shrink-0 flex items-center justify-center gap-1.5"
+                          >
+                            <i className="fa-solid fa-plus"></i> Add Entry
+                          </button>
+                        </div>
+                        {errors.inputTask && <p className="text-rose-400 text-[10px] font-semibold">{errors.inputTask}</p>}
+                      </form>
+
+                      {/* Task Errors */}
+                      {errors.tasks && (
+                        <div className="bg-rose-950/60 border border-rose-800/80 text-rose-300 p-3 rounded-xl text-xs flex items-center gap-2 font-semibold">
+                          <i className="fa-solid fa-circle-exclamation text-rose-400"></i>
+                          <span>{errors.tasks}</span>
+                        </div>
+                      )}
+
+                      {/* Interactive Task List */}
+                      <div className="space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                          <h2 className="text-xs font-extrabold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                            <i className="fa-solid fa-list-check text-cyan-400"></i> Task Items ({tasks.length})
+                          </h2>
+
+                          {/* Filter Tabs */}
+                          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-[10px]">
+                            {['all', 'done', 'wip', 'todo'].map((st) => (
+                              <button
+                                key={st}
+                                onClick={() => setStatusFilter(st)}
+                                className={`px-2 py-0.5 rounded capitalize font-semibold transition-colors ${
+                                  statusFilter === st ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                                }`}
+                              >
+                                {st}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* List */}
+                        <div className="space-y-2 max-h-[440px] overflow-y-auto pr-1">
+                          {filteredTasks.length === 0 ? (
+                            <div className="text-center py-10 text-slate-500 text-xs bg-slate-950/40 rounded-2xl border border-slate-800/80">
+                              <i className="fa-regular fa-folder-open text-2xl mb-2 block text-slate-600"></i>
+                              No tasks matched. Type a task above or paste text to parse.
+                            </div>
+                          ) : (
+                            filteredTasks.map((t) => (
+                              <div
+                                key={t.id}
+                                className="group flex flex-col sm:flex-row items-stretch sm:items-center justify-between p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 hover:border-slate-700 text-xs gap-3 transition-all shadow-sm"
+                              >
+                                <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                                  <span className="font-mono text-cyan-400 font-bold shrink-0">
+                                    Task{tasks.indexOf(t) + 1}:
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={t.text}
+                                    onChange={(e) => updateTaskText(t.id, e.target.value)}
+                                    className="w-full bg-transparent border-b border-transparent hover:border-slate-700 focus:border-cyan-500 font-mono text-slate-200 px-1 py-0.5 focus:outline-none transition-colors"
+                                  />
+                                </div>
+
+                                <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-800/80">
+                                  <select
+                                    value={t.status}
+                                    onChange={(e) => updateTaskStatus(t.id, e.target.value)}
+                                    className={`text-[11px] px-2.5 py-1 rounded-lg border font-bold font-mono focus:outline-none cursor-pointer ${badgeStyles[t.status] || badgeStyles.todo}`}
+                                  >
+                                    <option value="done">done</option>
+                                    <option value="wip">wip</option>
+                                    <option value="todo">Pending</option>
+                                  </select>
+
+                                  <div className="flex items-center gap-1">
+                                    {/* Dedicated Task Edit Button */}
+                                    <button
+                                      onClick={() => openEditModal(t)}
+                                      className="text-slate-400 hover:text-cyan-400 p-1.5 transition-colors cursor-pointer rounded-lg hover:bg-slate-800"
+                                      title="Edit Task Details"
+                                    >
+                                      <i className="fa-solid fa-pen text-xs"></i>
+                                    </button>
+
+                                    <button
+                                      onClick={() => removeTask(t.id)}
+                                      className="text-slate-400 hover:text-rose-400 p-1.5 transition-colors cursor-pointer rounded-lg hover:bg-slate-800"
+                                      title="Delete Task"
+                                    >
+                                      <i className="fa-solid fa-trash-can text-xs"></i>
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+
+                    </div>
+
+                    {/* Right Column Preview */}
+                    <div className="lg:sticky lg:top-6">
+                      <div className="glass-panel p-5 rounded-2xl border border-slate-800 relative shadow-2xl">
+                        <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
+                          <span className="text-xs uppercase font-extrabold tracking-wider text-cyan-400 flex items-center gap-2">
+                            <i className="fa-brands fa-microsoft text-indigo-400"></i> MS Teams Output Preview
+                          </span>
+                          <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Live Sync
+                          </span>
+                        </div>
+                        <pre className="text-xs font-mono text-slate-200 whitespace-pre-wrap break-words bg-slate-950/90 p-4 rounded-xl border border-slate-800 leading-relaxed overflow-x-auto select-all max-h-[360px] lg:max-h-[calc(100dvh-280px)] overflow-y-auto shadow-inner">
+{reportPreview}
+                        </pre>
+                        <button
+                          onClick={copyToClipboard}
+                          className="mt-4 w-full bg-gradient-to-r from-cyan-400 to-blue-500 hover:from-cyan-300 hover:to-blue-400 text-slate-950 font-extrabold px-4 py-2.5 rounded-xl text-xs transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-950/50 cursor-pointer"
+                        >
+                          <i className={`fa-solid ${copied ? 'fa-check' : 'fa-copy'}`}></i>
+                          {copied ? 'Copied Teams Format!' : 'Copy Teams Format'}
+                        </button>
+                      </div>
+                    </div>
+
+                  </div>
+                )}
+
+                {/* VIEW 2: ALL TIMESHEETS */}
+                {activeView === 'allTimesheets' && (
+                  <div className="space-y-4">
+                    <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-950/60 p-4 rounded-2xl border border-slate-800">
+                      <div className="relative w-full sm:w-2/3">
+                        <i className="fa-solid fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500 text-xs"></i>
+                        <input
+                          type="text"
+                          placeholder="Search all timesheets by project, date, or task contents..."
+                          value={timesheetsSearch}
+                          onChange={(e) => setTimesheetsSearch(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                      {allTimesheets.length > 0 && (
+                        <button
+                          onClick={clearAllTimesheetsRecords}
+                          className="w-full sm:w-auto bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
+                        >
+                          <i className="fa-solid fa-trash-can"></i> Clear All Timesheets
+                        </button>
+                      )}
+                    </div>
+
+                    {filteredTimesheets.length === 0 ? (
+                      <div className="text-center py-16 text-slate-500 text-xs bg-slate-950/40 rounded-2xl border border-slate-800">
+                        <i className="fa-solid fa-database text-3xl mb-3 block text-slate-600"></i>
+                        No saved timesheet records found in IndexedDB.
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                        {filteredTimesheets.map((item) => (
+                          <div
+                            key={item.id}
+                            className={`glass-card hover:border-slate-700 p-4 rounded-2xl transition-all group flex flex-col justify-between space-y-3 ${
+                              editingRecordId === item.id ? 'ring-2 ring-cyan-500/80 border-cyan-500/50' : ''
+                            }`}
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                              <div className="flex items-center flex-wrap gap-2 min-w-0">
+                                <span className="text-xs font-bold text-indigo-300 truncate">
+                                  {item.projectName || 'Unlabeled Project'}
+                                </span>
+                                <span className="text-[10px] font-mono text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded-md border border-cyan-800/40 shrink-0 font-bold">
+                                  {item.date}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
+                                <span className="text-[10px] text-slate-500 font-mono">{item.savedAt}</span>
+                                
+                                {/* Edit & Delete Buttons */}
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    onClick={() => loadTimesheetRecordForEdit(item)}
+                                    className="bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 font-bold px-2 py-1 rounded-lg text-[10px] transition-all flex items-center gap-1 cursor-pointer"
+                                    title="Edit and Update this Timesheet"
+                                  >
+                                    <i className="fa-solid fa-pen-to-square text-[10px]"></i> Edit
+                                  </button>
+                                  <button
+                                    onClick={(e) => deleteTimesheetRecord(item.id, e)}
+                                    className="text-slate-500 hover:text-rose-400 p-1.5 transition-colors rounded-lg hover:bg-slate-800"
+                                    title="Delete timesheet"
+                                  >
+                                    <i className="fa-solid fa-trash-can text-xs"></i>
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+
+                            <pre className="text-[11px] font-mono text-slate-300 bg-slate-950/80 p-3 rounded-xl border border-slate-800/80 whitespace-pre-wrap break-words leading-relaxed overflow-x-auto flex-1">
+{item.formattedReport}
+                            </pre>
+
+                            <button
+                              onClick={() => loadTimesheetRecordForEdit(item)}
+                              className="pt-1 text-[11px] text-cyan-400 font-bold group-hover:translate-x-1 transition-transform flex items-center gap-1.5 cursor-pointer self-start"
+                            >
+                              Edit & Update Timesheet <i className="fa-solid fa-arrow-right text-xs"></i>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
               </div>
-            )}
+            </div>
           </div>
         );
       }
